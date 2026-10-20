@@ -9,6 +9,10 @@ defmodule PaseoRelay.Socket do
   alias PaseoRelay.Delivery.Writer
   alias PaseoRelay.HandshakeValidation
   alias PaseoRelay.Ownership.Owner
+  alias PaseoRelay.RouteAuth
+
+  @route_auth_timeout_ms 4_000
+  @max_route_auth_payload_bytes 1_024
 
   @impl true
   def init(request, options) do
@@ -72,12 +76,6 @@ defmodule PaseoRelay.Socket do
            Capacity.attach_connection(
              state.admission,
              state.config.capacity_mutation_timeout_ms
-           ),
-         {:ok, writer} <-
-           Writer.start(
-             self(),
-             state.config.delivery_timeout_ms,
-             state.config.control_queue_bytes
            ) do
       state =
         Map.put(state, :admission, %{
@@ -85,7 +83,13 @@ defmodule PaseoRelay.Socket do
           monitor: Process.monitor(capacity)
         })
 
-      attach_writer(writer, state)
+      if state.connection.version == 3 and state.connection.role == :server do
+        {challenge, secret} = RouteAuth.challenge(state.connection)
+        timer = Process.send_after(self(), :route_auth_timeout, @route_auth_timeout_ms)
+        {[{:text, challenge}], Map.put(state, :route_auth, %{secret: secret, timer: timer})}
+      else
+        start_writer_and_attach(state)
+      end
     else
       {:error, _reason} -> {[{:close, 1012, "Session expired"}], state}
     end
@@ -93,10 +97,36 @@ defmodule PaseoRelay.Socket do
 
   @impl true
   def websocket_handle(
+        {opcode, payload},
+        %{route_auth: %{secret: secret, timer: timer}} = state
+      )
+      when opcode in [:text, :binary] do
+    if opcode == :text and RouteAuth.verify(state.connection, secret, payload) do
+      Process.cancel_timer(timer)
+      PaseoRelay.Metrics.inc(:route_auth_accepted)
+      {actions, attached} = start_writer_and_attach(Map.delete(state, :route_auth))
+
+      if Map.has_key?(attached, :owner_ref) do
+        max_payload =
+          if attached.connection.connection_id == "",
+            do: PaseoRelay.Protocol.maximum_control_payload_bytes(),
+            else: PaseoRelay.Protocol.maximum_message_payload_bytes()
+
+        {[{:set_options, %{max_frame_size: max_payload}} | actions], attached}
+      else
+        {actions, attached}
+      end
+    else
+      PaseoRelay.Metrics.inc(:route_auth_rejected)
+      {[{:close, 1008, "Invalid relay role proof"}], state}
+    end
+  end
+
+  def websocket_handle(
         frame,
-        %{connection: %{version: 2, role: :server, connection_id: ""}} = state
+        %{connection: %{version: version, role: :server, connection_id: ""}} = state
       ) do
-    handle_control_input(frame, state)
+    if version in [2, 3], do: handle_control_input(frame, state), else: {[], state}
   end
 
   def websocket_handle({opcode, payload}, state) when opcode in [:text, :binary] do
@@ -114,6 +144,11 @@ defmodule PaseoRelay.Socket do
   def websocket_handle(_control, state), do: {[], state}
 
   @impl true
+  def websocket_info(:route_auth_timeout, %{route_auth: _auth} = state) do
+    PaseoRelay.Metrics.inc(:route_auth_rejected)
+    {[{:close, 1008, "Relay role proof timeout"}], state}
+  end
+
   def websocket_info({:relay_frame, _writer, _reference, opcode, payload}, state) do
     {[{opcode, payload}], state}
   end
@@ -167,6 +202,8 @@ defmodule PaseoRelay.Socket do
 
   @impl true
   def terminate(_reason, _request, %{owner: owner} = state) do
+    if auth = state[:route_auth], do: Process.cancel_timer(auth.timer)
+
     if delivery = state[:delivery] do
       stop_delivery_task(delivery)
       PaseoRelay.Capacity.cancel_message(delivery.token)
@@ -309,7 +346,7 @@ defmodule PaseoRelay.Socket do
     do: Capacity.admit_connection(namespace, limit, holder, timeout)
 
   defp route(connection, options, holder) do
-    case PaseoRelay.Ownership.resolve(connection.server_id) do
+    case PaseoRelay.Ownership.resolve(connection.route_id) do
       {:reroute, _target} = decision ->
         decision
 
@@ -323,7 +360,7 @@ defmodule PaseoRelay.Socket do
            admit(options.connection_budget, holder, options.config.capacity_mutation_timeout_ms) do
       decision =
         PaseoRelay.Ownership.route(
-          connection.server_id,
+          connection.route_id,
           options.ownership_target,
           options.config.minimum_cluster_size
         )
@@ -342,7 +379,12 @@ defmodule PaseoRelay.Socket do
   defp admission_token(%{token: token}), do: token
   defp admission_token(token), do: token
 
-  defp websocket_options(%{version: 2, role: :server, connection_id: ""}) do
+  defp websocket_options(%{version: 3, role: :server}) do
+    websocket_options_with_limit(@max_route_auth_payload_bytes)
+  end
+
+  defp websocket_options(%{version: version, role: :server, connection_id: ""})
+       when version in [2, 3] do
     websocket_options_with_limit(PaseoRelay.Protocol.maximum_control_payload_bytes())
   end
 
@@ -407,6 +449,17 @@ defmodule PaseoRelay.Socket do
       :closed ->
         Process.exit(writer, :normal)
         {[{:close, 1012, "Session expired"}], state}
+    end
+  end
+
+  defp start_writer_and_attach(state) do
+    case Writer.start(
+           self(),
+           state.config.delivery_timeout_ms,
+           state.config.control_queue_bytes
+         ) do
+      {:ok, writer} -> attach_writer(writer, state)
+      {:error, _reason} -> {[{:close, 1012, "Session expired"}], state}
     end
   end
 end

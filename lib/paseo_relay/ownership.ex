@@ -190,18 +190,20 @@ defmodule PaseoRelay.Ownership.Owner do
         target = state.v1[opposite(connection.role)]
         {:reply, {:ok, writers(state, [target])}, state}
 
-      {timeout, %{connection: %Connection{version: 2, role: :client} = connection}} ->
+      {timeout, %{connection: %Connection{version: version, role: :client} = connection}}
+      when version in [2, 3] ->
         case state.data[connection.connection_id] do
           nil -> wait_for_data(state, from, socket, connection.connection_id, timeout)
           target -> {:reply, {:ok, writers(state, [target])}, state}
         end
 
-      {_timeout, %{connection: %Connection{version: 2, role: :server, connection_id: id}}}
-      when id != "" ->
+      {_timeout, %{connection: %Connection{version: version, role: :server, connection_id: id}}}
+      when version in [2, 3] and id != "" ->
         targets = state.clients[id] || MapSet.new()
         {:reply, {:ok, writers(state, targets)}, state}
 
-      {_timeout, %{connection: %Connection{version: 2, role: :server, connection_id: ""}}} ->
+      {_timeout, %{connection: %Connection{version: version, role: :server, connection_id: ""}}}
+      when version in [2, 3] ->
         {:reply, {:ok, :control}, state}
 
       {_timeout, _missing} ->
@@ -333,14 +335,20 @@ defmodule PaseoRelay.Ownership.Owner do
   defp attach_connection(
          state,
          socket,
-         %Connection{version: 2, role: :server, connection_id: ""}
-       ) do
+         %Connection{version: version, role: :server, connection_id: ""}
+       )
+       when version in [2, 3] do
     close(state, state.control, 1008, "Replaced by new connection")
     notify(state, socket, %{type: "sync", connectionIds: Map.keys(state.clients)})
     %{state | control: socket}
   end
 
-  defp attach_connection(state, socket, %Connection{version: 2, role: :server} = connection) do
+  defp attach_connection(
+         state,
+         socket,
+         %Connection{version: version, role: :server} = connection
+       )
+       when version in [2, 3] do
     old = state.data[connection.connection_id]
     close(state, old, 1008, "Replaced by new connection")
 
@@ -349,7 +357,12 @@ defmodule PaseoRelay.Ownership.Owner do
     |> release_waiters(connection.connection_id, socket)
   end
 
-  defp attach_connection(state, socket, %Connection{version: 2, role: :client} = connection) do
+  defp attach_connection(
+         state,
+         socket,
+         %Connection{version: version, role: :client} = connection
+       )
+       when version in [2, 3] do
     clients =
       Map.update(
         state.clients,
@@ -373,7 +386,12 @@ defmodule PaseoRelay.Ownership.Owner do
     end
   end
 
-  defp detach_connection(state, socket, %Connection{version: 2, role: :client} = connection) do
+  defp detach_connection(
+         state,
+         socket,
+         %Connection{version: version, role: :client} = connection
+       )
+       when version in [2, 3] do
     remaining = MapSet.delete(state.clients[connection.connection_id] || MapSet.new(), socket)
 
     if MapSet.size(remaining) == 0 do
@@ -393,9 +411,9 @@ defmodule PaseoRelay.Ownership.Owner do
   defp detach_connection(
          state,
          socket,
-         %Connection{version: 2, role: :server, connection_id: connection_id}
+         %Connection{version: version, role: :server, connection_id: connection_id}
        )
-       when connection_id != "" do
+       when version in [2, 3] and connection_id != "" do
     if state.data[connection_id] == socket do
       Enum.each(
         state.clients[connection_id] || [],
@@ -411,8 +429,9 @@ defmodule PaseoRelay.Ownership.Owner do
   defp detach_connection(
          state,
          socket,
-         %Connection{version: 2, role: :server, connection_id: ""}
-       ) do
+         %Connection{version: version, role: :server, connection_id: ""}
+       )
+       when version in [2, 3] do
     if state.control == socket, do: %{state | control: nil}, else: state
   end
 

@@ -39,7 +39,7 @@ defmodule PaseoRelay.HandshakeValidation do
     end
   end
 
-  defp valid_public_key?(encoded) when is_binary(encoded) do
+  def valid_public_key?(encoded) when is_binary(encoded) do
     with {:ok, public_key} <- Base.decode64(encoded, padding: true),
          32 <- byte_size(public_key),
          ^encoded <- Base.encode64(public_key),
@@ -51,7 +51,7 @@ defmodule PaseoRelay.HandshakeValidation do
     end
   end
 
-  defp valid_public_key?(_invalid), do: false
+  def valid_public_key?(_invalid), do: false
 
   defp canonical_coordinate?(<<coordinate::little-unsigned-integer-size(256)>>),
     do: coordinate < @field_prime

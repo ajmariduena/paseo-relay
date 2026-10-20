@@ -912,3 +912,21 @@
   test/paseo_relay/handshake_validation_test.exs test/relay_protocol_test.exs`
   passed 20/20 in 81.4 seconds. `asdf exec mix format`, `asdf exec mix compile
   --warnings-as-errors --force`, and `git diff --check` exited zero.
+
+## Authenticate v3 daemon routes
+
+- Red: the new `connection_test.exs` against the previous `Connection.from_query/1`
+  failed 2/3 tests: v3 requests were rejected as an unsupported version, so
+  neither fresh client routing nor the daemon proof could run.
+- Green: v3 binds the route to the daemon's public key, assigns each client a
+  fresh connection ID, and requires an X25519/HMAC proof before a server socket
+  can receive `sync` or replace a live control or data socket. The focused
+  real-WebSocket `connection_test.exs` and `relay_protocol_test.exs` passed
+  17/17, including a one-byte frame from a second client that did not reach
+  the first client's data socket.
+- The full suite in a Mac mini Docker container passed 112/113 with Node 22,
+  `jq`, process tools, and 65,535 file descriptors. The existing unread-fanout
+  pressure test hit its fixed 45-second test deadline. It hit the same deadline
+  with the previous relay sources in the same container. A temporary copy of
+  that test with a 120-second deadline passed 1/1 in 45.3 seconds; the
+  repository test was not changed.
