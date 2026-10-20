@@ -937,3 +937,10 @@
   cross-runtime test passed for a valid client, missing and wrong passwords,
   an invalid daemon-role proof, and continued use of the valid session. Elixir
   formatting checks passed.
+- Route-cap red: a real 65th v3 client stayed open and sent a `connected` event,
+  failing the test that expected a 1013 close. Green: each v3 route now admits
+  at most 64 client sockets; the same focused test passed 1/1 and proved a
+  closed client frees a slot for a replacement. The daemon separately rejects
+  oversized control syncs and caps its own data sockets at 64. The focused
+  v1/v2/v3 protocol checks passed 4/4; Elixir formatting and production
+  compilation with warnings as errors passed.

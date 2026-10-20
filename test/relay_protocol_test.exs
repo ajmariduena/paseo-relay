@@ -154,6 +154,39 @@ defmodule PaseoRelay.RelayProtocolTest do
     ])
   end
 
+  test "v3 caps client routes per daemon and frees a slot after disconnect" do
+    port = start_relay()
+    server_id = "srv_v3_capacity_#{port}"
+    {public_key, private_key} = :crypto.generate_key(:ecdh, :x25519)
+    key = Base.encode64(public_key)
+
+    {:ok, control} = connect(v3_url(port, server_id, key, "server"))
+    assert_receive {:relay_open, ^control}
+    authenticate_v3_socket(control, private_key, server_id, "")
+    assert_control(control, %{"type" => "sync", "connectionIds" => []}, 1_000)
+
+    clients =
+      for _ <- 1..64 do
+        {:ok, client} = connect(v3_url(port, server_id, key, "client"))
+        assert_receive {:relay_open, ^client}, 1_000
+        {client, assert_connected_id(control)}
+      end
+
+    {:ok, overflow} = connect(v3_url(port, server_id, key, "client"))
+    assert_receive {:relay_open, ^overflow}, 1_000
+    assert_receive {:relay_closed, ^overflow, {:remote, 1013, "Relay route capacity"}}, 1_000
+
+    {first_client, first_id} = hd(clients)
+    close_client(first_client)
+    assert_control(control, %{"type" => "disconnected", "connectionId" => first_id}, 1_000)
+
+    {:ok, replacement} = connect(v3_url(port, server_id, key, "client"))
+    assert_receive {:relay_open, ^replacement}, 1_000
+    assert assert_connected_id(control) != first_id
+
+    close_clients([control, overflow, replacement | Enum.map(clients, &elem(&1, 0))])
+  end
+
   test "v2 control answers the legacy JSON ping with a JSON pong" do
     port = start_relay()
 

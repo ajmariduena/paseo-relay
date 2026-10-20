@@ -63,6 +63,15 @@ Cowboy takes over the WebSocket. At the ceiling, the upgrade receives `503`,
 remain open. Slots are released explicitly at normal termination and by process
 monitoring after abnormal death.
 
+Relay v3 also caps each daemon route at 64 client WebSockets. The 65th client
+receives WebSocket close `1013` (`Relay route capacity`); existing clients stay
+connected, and a disconnect frees the slot immediately. This limits how much
+one public pairing route can consume of the node's global WebSocket budget. A
+peer that knows the pairing link can still fill those 64 slots and temporarily
+block new clients on that route. The daemon applies the same 64-data-socket
+ceiling to relay control messages, so a forged or stale `sync` cannot make it
+open an unbounded number of sockets.
+
 Ranch's own connection accounting is not this safety boundary: Cowboy removes
 an upgraded connection from Ranch accounting at WebSocket takeover. Ranch
 limits only concurrent pre-upgrade HTTP handling and applies TCP backlog

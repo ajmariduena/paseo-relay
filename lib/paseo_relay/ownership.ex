@@ -110,6 +110,7 @@ defmodule PaseoRelay.Ownership.Owner do
   @reservation_ms 5_000
   @idle_ms 30_000
   @call_timeout_ms 5_000
+  @max_v3_client_routes 64
 
   def start(server_id, target), do: GenServer.start(__MODULE__, {server_id, target})
   def reserve(owner), do: call(owner, :reserve)
@@ -229,25 +230,37 @@ defmodule PaseoRelay.Ownership.Owner do
 
       {timer, reservations} ->
         Process.cancel_timer(timer)
+        state = %{state | reservations: reservations}
 
-        socket_state = %{
-          monitor: Process.monitor(socket),
-          connection: attachment && elem(attachment, 0),
-          writer: attachment && elem(attachment, 1)
-        }
+        if v3_client_route_full?(state, attachment) do
+          {:reply, :capacity, idle_when_empty(state)}
+        else
+          socket_state = %{
+            monitor: Process.monitor(socket),
+            connection: attachment && elem(attachment, 0),
+            writer: attachment && elem(attachment, 1)
+          }
 
-        state = %{
-          cancel_idle(state)
-          | reservations: reservations,
-            sockets: Map.put(state.sockets, socket, socket_state)
-        }
+          state = %{
+            cancel_idle(state)
+            | sockets: Map.put(state.sockets, socket, socket_state)
+          }
 
-        state =
-          if attachment, do: attach_connection(state, socket, elem(attachment, 0)), else: state
+          state =
+            if attachment, do: attach_connection(state, socket, elem(attachment, 0)), else: state
 
-        {:reply, :ok, state}
+          {:reply, :ok, state}
+        end
     end
   end
+
+  defp v3_client_route_full?(
+         %{clients: clients},
+         {%Connection{version: 3, role: :client}, _writer}
+       ),
+       do: map_size(clients) >= @max_v3_client_routes
+
+  defp v3_client_route_full?(_state, _attachment), do: false
 
   @impl true
   def handle_cast({:cancel, token}, state) do

@@ -449,6 +449,10 @@ defmodule PaseoRelay.Socket do
       :closed ->
         Process.exit(writer, :normal)
         {[{:close, 1012, "Session expired"}], state}
+
+      :capacity ->
+        Process.exit(writer, :normal)
+        {[{:close, 1013, "Relay route capacity"}], state}
     end
   end
 
