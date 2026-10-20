@@ -137,6 +137,12 @@ defmodule PaseoRelay.RelayProtocolTest do
     :ok = WebSockex.send_frame(first_data, {:text, large_reply})
     assert_receive {:relay_frame, ^first_client, :text, ^large_reply}, 1_000
 
+    :ok = WebSockex.send_frame(first_data, {:close, 4401, "Password required"})
+    assert_receive {:relay_closed, ^first_client, {:remote, 4401, "Password required"}}, 1_000
+
+    :ok = WebSockex.send_frame(second_client, {:text, "still-live"})
+    assert_receive {:relay_frame, ^second_data, :text, "still-live"}, 1_000
+
     close_clients([
       control,
       impostor,

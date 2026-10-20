@@ -121,7 +121,7 @@ defmodule PaseoRelay.Ownership.Owner do
     do: call(owner, {:attach, reservation, socket, connection, writer})
 
   def cancel(owner, reservation), do: GenServer.cast(owner, {:cancel, reservation})
-  def detach(owner, socket), do: GenServer.cast(owner, {:detach, socket})
+  def detach(owner, socket, reason), do: GenServer.cast(owner, {:detach, socket, reason})
   def legacy(owner, socket), do: call(owner, {:legacy, socket})
 
   def destinations(owner, socket, deadline, attach_timeout) do
@@ -261,7 +261,8 @@ defmodule PaseoRelay.Ownership.Owner do
     end
   end
 
-  def handle_cast({:detach, socket}, state), do: {:noreply, remove_socket(state, socket)}
+  def handle_cast({:detach, socket, reason}, state),
+    do: {:noreply, remove_socket(state, socket, reason)}
 
   @impl true
   def handle_info({:expired, token}, state),
@@ -311,7 +312,7 @@ defmodule PaseoRelay.Ownership.Owner do
 
   def handle_info(:idle, state), do: {:noreply, state}
 
-  defp remove_socket(state, socket) do
+  defp remove_socket(state, socket, reason \\ :unknown) do
     case Map.pop(state.sockets, socket) do
       {nil, _} ->
         state
@@ -320,7 +321,7 @@ defmodule PaseoRelay.Ownership.Owner do
         Process.demonitor(reference, [:flush])
 
         %{state | sockets: sockets}
-        |> detach_connection(socket, connection)
+        |> detach_connection(socket, connection, reason)
         |> reject_source_waiters(socket)
         |> idle_when_empty()
     end
@@ -376,9 +377,9 @@ defmodule PaseoRelay.Ownership.Owner do
     %{state | clients: clients}
   end
 
-  defp detach_connection(state, _socket, nil), do: state
+  defp detach_connection(state, _socket, nil, _reason), do: state
 
-  defp detach_connection(state, socket, %Connection{version: 1} = connection) do
+  defp detach_connection(state, socket, %Connection{version: 1} = connection, _reason) do
     if state.v1[connection.role] == socket do
       %{state | v1: Map.put(state.v1, connection.role, nil)}
     else
@@ -389,7 +390,8 @@ defmodule PaseoRelay.Ownership.Owner do
   defp detach_connection(
          state,
          socket,
-         %Connection{version: version, role: :client} = connection
+         %Connection{version: version, role: :client} = connection,
+         _reason
        )
        when version in [2, 3] do
     remaining = MapSet.delete(state.clients[connection.connection_id] || MapSet.new(), socket)
@@ -411,13 +413,16 @@ defmodule PaseoRelay.Ownership.Owner do
   defp detach_connection(
          state,
          socket,
-         %Connection{version: version, role: :server, connection_id: connection_id}
+         %Connection{version: version, role: :server, connection_id: connection_id},
+         reason
        )
        when version in [2, 3] and connection_id != "" do
     if state.data[connection_id] == socket do
+      {code, close_reason} = client_close_reason(version, reason)
+
       Enum.each(
         state.clients[connection_id] || [],
-        &close(state, &1, 1012, "Server disconnected")
+        &close(state, &1, code, close_reason)
       )
 
       %{state | data: Map.delete(state.data, connection_id)}
@@ -429,11 +434,17 @@ defmodule PaseoRelay.Ownership.Owner do
   defp detach_connection(
          state,
          socket,
-         %Connection{version: version, role: :server, connection_id: ""}
+         %Connection{version: version, role: :server, connection_id: ""},
+         _reason
        )
        when version in [2, 3] do
     if state.control == socket, do: %{state | control: nil}, else: state
   end
+
+  defp client_close_reason(3, {:remote, 4401, reason})
+       when reason in ["Password required", "Incorrect password"], do: {4401, reason}
+
+  defp client_close_reason(_version, _reason), do: {1012, "Server disconnected"}
 
   defp wait_for_data(state, from, source, connection_id, timeout) do
     reference = make_ref()

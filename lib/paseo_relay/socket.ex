@@ -201,7 +201,7 @@ defmodule PaseoRelay.Socket do
   def websocket_info(_message, state), do: {[], state}
 
   @impl true
-  def terminate(_reason, _request, %{owner: owner} = state) do
+  def terminate(reason, _request, %{owner: owner} = state) do
     if auth = state[:route_auth], do: Process.cancel_timer(auth.timer)
 
     if delivery = state[:delivery] do
@@ -210,7 +210,7 @@ defmodule PaseoRelay.Socket do
     end
 
     Capacity.release_connection(admission_token(state.admission))
-    Owner.detach(owner, self())
+    Owner.detach(owner, self(), reason)
   end
 
   def terminate(_reason, _request, _state), do: :ok

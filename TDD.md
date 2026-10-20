@@ -930,3 +930,10 @@
   with the previous relay sources in the same container. A temporary copy of
   that test with a 120-second deadline passed 1/1 in 45.3 seconds; the
   repository test was not changed.
+- A live Node daemon and client against this Elixir relay exposed that daemon
+  authentication closes were being rewritten as generic disconnects. The v3
+  relay now passes through only the recognized 4401 password reasons. The
+  Elixir v3 socket test passed 1/1 and v1/v2 smoke tests passed 2/2. The live
+  cross-runtime test passed for a valid client, missing and wrong passwords,
+  an invalid daemon-role proof, and continued use of the valid session. Elixir
+  formatting checks passed.
