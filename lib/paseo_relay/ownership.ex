@@ -110,6 +110,7 @@ defmodule PaseoRelay.Ownership.Owner do
   @reservation_ms 5_000
   @idle_ms 30_000
   @call_timeout_ms 5_000
+  @max_v3_client_routes 64
 
   def start(server_id, target), do: GenServer.start(__MODULE__, {server_id, target})
   def reserve(owner), do: call(owner, :reserve)
@@ -121,7 +122,7 @@ defmodule PaseoRelay.Ownership.Owner do
     do: call(owner, {:attach, reservation, socket, connection, writer})
 
   def cancel(owner, reservation), do: GenServer.cast(owner, {:cancel, reservation})
-  def detach(owner, socket), do: GenServer.cast(owner, {:detach, socket})
+  def detach(owner, socket, reason), do: GenServer.cast(owner, {:detach, socket, reason})
   def legacy(owner, socket), do: call(owner, {:legacy, socket})
 
   def destinations(owner, socket, deadline, attach_timeout) do
@@ -190,18 +191,20 @@ defmodule PaseoRelay.Ownership.Owner do
         target = state.v1[opposite(connection.role)]
         {:reply, {:ok, writers(state, [target])}, state}
 
-      {timeout, %{connection: %Connection{version: 2, role: :client} = connection}} ->
+      {timeout, %{connection: %Connection{version: version, role: :client} = connection}}
+      when version in [2, 3] ->
         case state.data[connection.connection_id] do
           nil -> wait_for_data(state, from, socket, connection.connection_id, timeout)
           target -> {:reply, {:ok, writers(state, [target])}, state}
         end
 
-      {_timeout, %{connection: %Connection{version: 2, role: :server, connection_id: id}}}
-      when id != "" ->
+      {_timeout, %{connection: %Connection{version: version, role: :server, connection_id: id}}}
+      when version in [2, 3] and id != "" ->
         targets = state.clients[id] || MapSet.new()
         {:reply, {:ok, writers(state, targets)}, state}
 
-      {_timeout, %{connection: %Connection{version: 2, role: :server, connection_id: ""}}} ->
+      {_timeout, %{connection: %Connection{version: version, role: :server, connection_id: ""}}}
+      when version in [2, 3] ->
         {:reply, {:ok, :control}, state}
 
       {_timeout, _missing} ->
@@ -227,25 +230,37 @@ defmodule PaseoRelay.Ownership.Owner do
 
       {timer, reservations} ->
         Process.cancel_timer(timer)
+        state = %{state | reservations: reservations}
 
-        socket_state = %{
-          monitor: Process.monitor(socket),
-          connection: attachment && elem(attachment, 0),
-          writer: attachment && elem(attachment, 1)
-        }
+        if v3_client_route_full?(state, attachment) do
+          {:reply, :capacity, idle_when_empty(state)}
+        else
+          socket_state = %{
+            monitor: Process.monitor(socket),
+            connection: attachment && elem(attachment, 0),
+            writer: attachment && elem(attachment, 1)
+          }
 
-        state = %{
-          cancel_idle(state)
-          | reservations: reservations,
-            sockets: Map.put(state.sockets, socket, socket_state)
-        }
+          state = %{
+            cancel_idle(state)
+            | sockets: Map.put(state.sockets, socket, socket_state)
+          }
 
-        state =
-          if attachment, do: attach_connection(state, socket, elem(attachment, 0)), else: state
+          state =
+            if attachment, do: attach_connection(state, socket, elem(attachment, 0)), else: state
 
-        {:reply, :ok, state}
+          {:reply, :ok, state}
+        end
     end
   end
+
+  defp v3_client_route_full?(
+         %{clients: clients},
+         {%Connection{version: 3, role: :client}, _writer}
+       ),
+       do: map_size(clients) >= @max_v3_client_routes
+
+  defp v3_client_route_full?(_state, _attachment), do: false
 
   @impl true
   def handle_cast({:cancel, token}, state) do
@@ -259,7 +274,8 @@ defmodule PaseoRelay.Ownership.Owner do
     end
   end
 
-  def handle_cast({:detach, socket}, state), do: {:noreply, remove_socket(state, socket)}
+  def handle_cast({:detach, socket, reason}, state),
+    do: {:noreply, remove_socket(state, socket, reason)}
 
   @impl true
   def handle_info({:expired, token}, state),
@@ -309,7 +325,7 @@ defmodule PaseoRelay.Ownership.Owner do
 
   def handle_info(:idle, state), do: {:noreply, state}
 
-  defp remove_socket(state, socket) do
+  defp remove_socket(state, socket, reason \\ :unknown) do
     case Map.pop(state.sockets, socket) do
       {nil, _} ->
         state
@@ -318,7 +334,7 @@ defmodule PaseoRelay.Ownership.Owner do
         Process.demonitor(reference, [:flush])
 
         %{state | sockets: sockets}
-        |> detach_connection(socket, connection)
+        |> detach_connection(socket, connection, reason)
         |> reject_source_waiters(socket)
         |> idle_when_empty()
     end
@@ -333,14 +349,20 @@ defmodule PaseoRelay.Ownership.Owner do
   defp attach_connection(
          state,
          socket,
-         %Connection{version: 2, role: :server, connection_id: ""}
-       ) do
+         %Connection{version: version, role: :server, connection_id: ""}
+       )
+       when version in [2, 3] do
     close(state, state.control, 1008, "Replaced by new connection")
     notify(state, socket, %{type: "sync", connectionIds: Map.keys(state.clients)})
     %{state | control: socket}
   end
 
-  defp attach_connection(state, socket, %Connection{version: 2, role: :server} = connection) do
+  defp attach_connection(
+         state,
+         socket,
+         %Connection{version: version, role: :server} = connection
+       )
+       when version in [2, 3] do
     old = state.data[connection.connection_id]
     close(state, old, 1008, "Replaced by new connection")
 
@@ -349,7 +371,12 @@ defmodule PaseoRelay.Ownership.Owner do
     |> release_waiters(connection.connection_id, socket)
   end
 
-  defp attach_connection(state, socket, %Connection{version: 2, role: :client} = connection) do
+  defp attach_connection(
+         state,
+         socket,
+         %Connection{version: version, role: :client} = connection
+       )
+       when version in [2, 3] do
     clients =
       Map.update(
         state.clients,
@@ -363,9 +390,9 @@ defmodule PaseoRelay.Ownership.Owner do
     %{state | clients: clients}
   end
 
-  defp detach_connection(state, _socket, nil), do: state
+  defp detach_connection(state, _socket, nil, _reason), do: state
 
-  defp detach_connection(state, socket, %Connection{version: 1} = connection) do
+  defp detach_connection(state, socket, %Connection{version: 1} = connection, _reason) do
     if state.v1[connection.role] == socket do
       %{state | v1: Map.put(state.v1, connection.role, nil)}
     else
@@ -373,7 +400,13 @@ defmodule PaseoRelay.Ownership.Owner do
     end
   end
 
-  defp detach_connection(state, socket, %Connection{version: 2, role: :client} = connection) do
+  defp detach_connection(
+         state,
+         socket,
+         %Connection{version: version, role: :client} = connection,
+         _reason
+       )
+       when version in [2, 3] do
     remaining = MapSet.delete(state.clients[connection.connection_id] || MapSet.new(), socket)
 
     if MapSet.size(remaining) == 0 do
@@ -393,13 +426,16 @@ defmodule PaseoRelay.Ownership.Owner do
   defp detach_connection(
          state,
          socket,
-         %Connection{version: 2, role: :server, connection_id: connection_id}
+         %Connection{version: version, role: :server, connection_id: connection_id},
+         reason
        )
-       when connection_id != "" do
+       when version in [2, 3] and connection_id != "" do
     if state.data[connection_id] == socket do
+      {code, close_reason} = client_close_reason(version, reason)
+
       Enum.each(
         state.clients[connection_id] || [],
-        &close(state, &1, 1012, "Server disconnected")
+        &close(state, &1, code, close_reason)
       )
 
       %{state | data: Map.delete(state.data, connection_id)}
@@ -411,10 +447,17 @@ defmodule PaseoRelay.Ownership.Owner do
   defp detach_connection(
          state,
          socket,
-         %Connection{version: 2, role: :server, connection_id: ""}
-       ) do
+         %Connection{version: version, role: :server, connection_id: ""},
+         _reason
+       )
+       when version in [2, 3] do
     if state.control == socket, do: %{state | control: nil}, else: state
   end
+
+  defp client_close_reason(3, {:remote, 4401, reason})
+       when reason in ["Password required", "Incorrect password"], do: {4401, reason}
+
+  defp client_close_reason(_version, _reason), do: {1012, "Server disconnected"}
 
   defp wait_for_data(state, from, source, connection_id, timeout) do
     reference = make_ref()

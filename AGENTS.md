@@ -15,6 +15,13 @@ Read the bar and the diagnostics discipline in
 in particular: never dump full process state (`:sys.get_state/1`) on live
 nodes, and never stack production actions.
 
+**PRs go only to repositories owned by `ajmariduena`.** Before creating or
+retargeting a PR, inspect its **base repository** with
+`gh repo view <owner/repo> --json nameWithOwner,viewerPermission` and require
+`nameWithOwner` to start with `ajmariduena/`. A head branch in our fork does
+not make an upstream PR ours. `getpaseo/*` is fetch-only and must never be a
+PR base. If our fork is missing, create it and target its branch.
+
 ## Docs
 
 | Doc | What's in it |

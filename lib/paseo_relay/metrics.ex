@@ -10,6 +10,10 @@ defmodule PaseoRelay.Metrics do
      "WebSocket upgrades rerouted to another owner."},
     {:connection_rejections, :counter, "connection_rejections_total",
      "WebSocket upgrades rejected at configured capacity or during memory pressure."},
+    {:route_auth_accepted, :counter, "route_auth_accepted_total",
+     "Daemon role proofs accepted for v3 routes."},
+    {:route_auth_rejected, :counter, "route_auth_rejected_total",
+     "Daemon role proofs rejected or timed out for v3 routes."},
     {:frames_forwarded, :counter, "frames_forwarded_total",
      "WebSocket frames forwarded by this node."},
     {:bytes_forwarded, :counter, "bytes_forwarded_total",
@@ -55,7 +59,7 @@ defmodule PaseoRelay.Metrics do
   @computed_names ~w(active_websockets active_sessions ingress_reserved_bytes inflight_delivery_bytes backpressured_sources max_frame_bytes beam_total_memory beam_process_memory beam_binary_memory beam_ets_memory)a
   @capacity_names ~w(active_websockets ingress_reserved_bytes inflight_delivery_bytes backpressured_sources)a
   @handshake_outcomes [:accepted, :rejected]
-  @handshake_versions [1, 2]
+  @handshake_versions [1, 2, 3]
   @handshake_types [:hello, :e2ee_hello]
   @handshake_counter_names for outcome <- @handshake_outcomes,
                                version <- @handshake_versions,

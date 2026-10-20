@@ -13,6 +13,17 @@ deliberate compatibility difference from the Durable Object relay, which does
 not impose this relay-side route-key limit. Oversized identifiers receive `400`
 before they can create ownership or session state.
 
+V3 uses `serverId`, `daemonKey` (the canonical Base64 X25519 public key), and
+`role`. Its session owner is keyed by both `serverId` and `daemonKey`.
+`serverId` is URL-safe and at most 64 bytes; a server-data `connectionId` is
+URL-safe and at most 128 bytes. The relay ignores a client-provided
+`connectionId` and assigns a fresh 128-bit route ID per socket. A socket
+claiming `role=server` must answer a fresh X25519/HMAC challenge bound to its
+server ID and data-route ID before it can replace a daemon socket, receive a
+client list, or forward frames. Invalid proofs close only that candidate.
+V1/V2 remain available for older deployments; updated Paseo clients and daemons
+use V3 without downgrade. Deploy this relay before updating the daemon and app.
+
 ## Development
 
 The Elixir and Erlang versions are managed with [asdf](https://asdf-vm.com/):
@@ -55,7 +66,7 @@ generic:
 | `PASEO_RELAY_DELIVERY_TIMEOUT_MS` | `30000` | Maximum Writer reservation/write-barrier wait before a slow destination is shed. |
 | `PASEO_RELAY_TRANSPORT_SEND_TIMEOUT_MS` | `35000` | TCP send timeout. Must be greater than the Writer deadline so application shedding is recorded before the transport's final fallback. |
 | `PASEO_RELAY_CONTROL_QUEUE_BYTES` | `1048576` | Per-destination bound for queued control notifications. |
-| `PASEO_RELAY_DATA_ATTACH_TIMEOUT_MS` | `15000` | Maximum time a v2 client frame waits for its daemon-data socket. |
+| `PASEO_RELAY_DATA_ATTACH_TIMEOUT_MS` | `15000` | Maximum time a v2/v3 client frame waits for its daemon-data socket. |
 | `PASEO_RELAY_TCP_RECEIVE_BUFFER_BYTES` | `65536` | Per-socket TCP receive buffer. |
 | `PASEO_RELAY_WEBSOCKET_MAX_HEAP_WORDS` | `33554432` | Per-WebSocket BEAM heap fuse, including shared binaries. Values below this protocol-safe floor are rejected. |
 | `PASEO_RELAY_MEMORY_WATERMARK_BYTES` | `0` | Optional BEAM total-memory watermark that pauses admission and sheds WebSockets with `1013` until measured memory reaches the recovery threshold; disabled generically because the safe threshold depends on the deployment memory limit. |

@@ -72,6 +72,121 @@ defmodule PaseoRelay.RelayProtocolTest do
     close_clients([control, data, client])
   end
 
+  test "v3 proves the daemon role and isolates clients that request the same route id" do
+    port = start_relay()
+    server_id = "srv_v3_#{port}"
+    {public_key, private_key} = :crypto.generate_key(:ecdh, :x25519)
+    key = Base.encode64(public_key)
+
+    {:ok, control} = connect(v3_url(port, server_id, key, "server"))
+    assert_receive {:relay_open, ^control}
+    authenticate_v3_socket(control, private_key, server_id, "")
+    assert_control(control, %{"type" => "sync", "connectionIds" => []}, 1_000)
+
+    {:ok, impostor} = connect(v3_url(port, server_id, key, "server"))
+    assert_receive {:relay_open, ^impostor}
+    assert_receive {:relay_frame, ^impostor, :text, challenge}, 1_000
+    assert Jason.decode!(challenge)["type"] == "relay_auth_challenge"
+
+    :ok =
+      WebSockex.send_frame(impostor, {:text, ~s({"type":"relay_auth_response","proof":"bad"})})
+
+    assert_receive {:relay_closed, ^impostor, {:remote, 1008, "Invalid relay role proof"}}, 1_000
+    refute_receive {:relay_closed, ^control, _reason}, 100
+
+    {:ok, first_client} = connect(v3_url(port, server_id, key, "client", "conn_shared"))
+    assert_receive {:relay_open, ^first_client}
+    first_id = assert_connected_id(control)
+    assert first_id != "conn_shared"
+
+    {:ok, first_data} = connect(v3_url(port, server_id, key, "server", first_id))
+    assert_receive {:relay_open, ^first_data}
+    authenticate_v3_socket(first_data, private_key, server_id, first_id)
+
+    {:ok, impostor_data} = connect(v3_url(port, server_id, key, "server", first_id))
+    assert_receive {:relay_open, ^impostor_data}
+    assert_receive {:relay_frame, ^impostor_data, :text, _challenge}, 1_000
+
+    :ok =
+      WebSockex.send_frame(
+        impostor_data,
+        {:text, ~s({"type":"relay_auth_response","proof":"bad"})}
+      )
+
+    assert_receive {:relay_closed, ^impostor_data, {:remote, 1008, "Invalid relay role proof"}},
+                   1_000
+
+    refute_receive {:relay_closed, ^first_data, _reason}, 100
+
+    {:ok, second_client} = connect(v3_url(port, server_id, key, "client", first_id))
+    assert_receive {:relay_open, ^second_client}
+    second_id = assert_connected_id(control)
+    assert second_id != first_id
+
+    {:ok, second_data} = connect(v3_url(port, server_id, key, "server", second_id))
+    assert_receive {:relay_open, ^second_data}
+    authenticate_v3_socket(second_data, private_key, server_id, second_id)
+
+    :ok = WebSockex.send_frame(second_client, {:text, "x"})
+    assert_receive {:relay_frame, ^second_data, :text, "x"}, 1_000
+    refute_receive {:relay_frame, ^first_data, :text, "x"}, 100
+
+    :ok = WebSockex.send_frame(first_client, {:text, "still-connected"})
+    assert_receive {:relay_frame, ^first_data, :text, "still-connected"}, 1_000
+    large_reply = String.duplicate("r", 2_048)
+    :ok = WebSockex.send_frame(first_data, {:text, large_reply})
+    assert_receive {:relay_frame, ^first_client, :text, ^large_reply}, 1_000
+
+    :ok = WebSockex.send_frame(first_data, {:close, 4401, "Password required"})
+    assert_receive {:relay_closed, ^first_client, {:remote, 4401, "Password required"}}, 1_000
+
+    :ok = WebSockex.send_frame(second_client, {:text, "still-live"})
+    assert_receive {:relay_frame, ^second_data, :text, "still-live"}, 1_000
+
+    close_clients([
+      control,
+      impostor,
+      first_client,
+      first_data,
+      impostor_data,
+      second_client,
+      second_data
+    ])
+  end
+
+  test "v3 caps client routes per daemon and frees a slot after disconnect" do
+    port = start_relay()
+    server_id = "srv_v3_capacity_#{port}"
+    {public_key, private_key} = :crypto.generate_key(:ecdh, :x25519)
+    key = Base.encode64(public_key)
+
+    {:ok, control} = connect(v3_url(port, server_id, key, "server"))
+    assert_receive {:relay_open, ^control}
+    authenticate_v3_socket(control, private_key, server_id, "")
+    assert_control(control, %{"type" => "sync", "connectionIds" => []}, 1_000)
+
+    clients =
+      for _ <- 1..64 do
+        {:ok, client} = connect(v3_url(port, server_id, key, "client"))
+        assert_receive {:relay_open, ^client}, 1_000
+        {client, assert_connected_id(control)}
+      end
+
+    {:ok, overflow} = connect(v3_url(port, server_id, key, "client"))
+    assert_receive {:relay_open, ^overflow}, 1_000
+    assert_receive {:relay_closed, ^overflow, {:remote, 1013, "Relay route capacity"}}, 1_000
+
+    {first_client, first_id} = hd(clients)
+    close_client(first_client)
+    assert_control(control, %{"type" => "disconnected", "connectionId" => first_id}, 1_000)
+
+    {:ok, replacement} = connect(v3_url(port, server_id, key, "client"))
+    assert_receive {:relay_open, ^replacement}, 1_000
+    assert assert_connected_id(control) != first_id
+
+    close_clients([control, overflow, replacement | Enum.map(clients, &elem(&1, 0))])
+  end
+
   test "v2 control answers the legacy JSON ping with a JSON pong" do
     port = start_relay()
 
@@ -365,6 +480,36 @@ defmodule PaseoRelay.RelayProtocolTest do
   defp v2_url(port, role, connection_id \\ nil) do
     query = if connection_id, do: "&connectionId=#{connection_id}", else: ""
     "ws://127.0.0.1:#{port}/ws?serverId=#{v2_server_id(port)}&role=#{role}&v=2#{query}"
+  end
+
+  defp v3_url(port, server_id, key, role, connection_id \\ nil) do
+    route = if connection_id, do: "&connectionId=#{URI.encode_www_form(connection_id)}", else: ""
+
+    "ws://127.0.0.1:#{port}/ws?serverId=#{server_id}&role=#{role}&v=3&daemonKey=#{URI.encode_www_form(key)}#{route}"
+  end
+
+  defp authenticate_v3_socket(socket, daemon_private_key, server_id, connection_id) do
+    assert_receive {:relay_frame, ^socket, :text, payload}, 1_000
+
+    %{"type" => "relay_auth_challenge", "key" => key, "nonce" => nonce} =
+      Jason.decode!(payload)
+
+    {:ok, relay_public_key} = Base.decode64(key)
+    shared = :crypto.compute_key(:ecdh, relay_public_key, daemon_private_key, :x25519)
+    message = Jason.encode!(["paseo-relay-v3", server_id, connection_id, nonce])
+    proof = :crypto.mac(:hmac, :sha256, shared, message) |> Base.encode64()
+
+    :ok =
+      WebSockex.send_frame(
+        socket,
+        {:text, Jason.encode!(%{type: "relay_auth_response", proof: proof})}
+      )
+  end
+
+  defp assert_connected_id(control) do
+    assert_receive {:relay_frame, ^control, :text, payload}, 1_000
+    %{"type" => "connected", "connectionId" => id} = Jason.decode!(payload)
+    id
   end
 
   defp v2_server_id(port) do

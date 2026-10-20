@@ -63,6 +63,15 @@ Cowboy takes over the WebSocket. At the ceiling, the upgrade receives `503`,
 remain open. Slots are released explicitly at normal termination and by process
 monitoring after abnormal death.
 
+Relay v3 also caps each daemon route at 64 client WebSockets. The 65th client
+receives WebSocket close `1013` (`Relay route capacity`); existing clients stay
+connected, and a disconnect frees the slot immediately. This limits how much
+one public pairing route can consume of the node's global WebSocket budget. A
+peer that knows the pairing link can still fill those 64 slots and temporarily
+block new clients on that route. The daemon applies the same 64-data-socket
+ceiling to relay control messages, so a forged or stale `sync` cannot make it
+open an unbounded number of sockets.
+
 Ranch's own connection accounting is not this safety boundary: Cowboy removes
 an upgraded connection from Ranch accounting at WebSocket takeover. Ranch
 limits only concurrent pre-upgrade HTTP handling and applies TCP backlog
@@ -253,7 +262,7 @@ with room for the configured ingress budget and VM overhead.
 
   The masked client data-frame wire ceiling remains exactly 32 MiB, so Cowboy
   bounds each complete or reassembled fragmented message to `32 MiB - 14 bytes`
-  and sends `1009` for one byte more. Inbound v2 control input is limited to
+  and sends `1009` for one byte more. Inbound v2/v3 control input is limited to
   64 KiB, charged through JSON parsing, and oversized input receives `1009`.
   Cowboy has already assembled a complete payload before `websocket_handle/2`
   can request its byte-only Capacity token. The 32 MiB ceiling, per-WebSocket
@@ -279,6 +288,14 @@ with room for the configured ingress budget and VM overhead.
   Invalid handshake key`; the frame is never forwarded. The validation stores
   no handshake phase, does not inspect daemon-originated frames, and never logs
   key material or `serverId`.
+- **A socket claims the v3 daemon role without proof:** it receives a fresh
+  X25519 challenge and remains detached from control and data routing. The
+  first proof frame is limited to 1 KiB, and a missing proof closes after four
+  seconds. A bad proof closes only the candidate with `1008`; the current
+  daemon socket and clients remain attached. After proof, Cowboy raises the
+  socket's frame limit to 64 KiB for control or the ordinary data limit for
+  daemon data. `paseo_relay_route_auth_rejected_total` counts failures and
+  timeouts without route identifiers.
 - **Two nodes concurrently claim a previously unowned `serverId`:** Syn favors
   availability, so both WebSockets can initially open against different local
   owners. Conflict resolution keeps one owner and closes sockets on the loser
@@ -334,7 +351,7 @@ labels such as app, region, host, and instance. Do not add `serverId` or
 
 `paseo_relay_handshake_accepted_total` and
 `paseo_relay_handshake_rejected_total` expose the protocol validation with only
-the fixed `routing_version` (`v1`/`v2`) and `type`
+the fixed `routing_version` (`v1`/`v2`/`v3`) and `type`
 (`hello`/`e2ee_hello`) labels. They count matching client frames accepted or
 rejected by the validation; they never contain route identifiers or key
 material.
